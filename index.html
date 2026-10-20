@@ -4,7 +4,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SVG Launcher</title>
+<title>Cherri Launcher</title>
 <style>
 :root{color-scheme:dark;--bg:#0c0b10;--line:#322f3d;--text:#f1eef8;--muted:#a29cb2;--accent:#b58cff;--good:#7ee2a8;--bad:#ff8b9a}
 *{box-sizing:border-box}
@@ -24,8 +24,8 @@ button{margin-top:12px;padding:10px 16px;border:1px solid #b58cff;border-radius:
 </head>
 <body>
 <main class="card">
-  <h1>SVG Launcher</h1>
-  <p class="sub">Downloads every file from <code>cherriunblocked/svg</code> and runs it in this tab.</p>
+  <h1>Cherri Launcher</h1>
+  <p class="sub">Downloads every file from <code>dadasuki/cherri</code> and runs it in this tab.</p>
   <div class="top"><b id="cur">Starting…</b><span id="count"></span></div>
   <div class="bar"><i id="bar"></i></div>
   <div id="log"></div>
@@ -34,7 +34,7 @@ button{margin-top:12px;padding:10px 16px;border:1px solid #b58cff;border-radius:
 <script>
 (() => {
 'use strict';
-const OWNER = 'cherriunblocked', REPO = 'svg', BRANCH = 'main';
+const OWNER = 'dadasuki', REPO = 'cherri', BRANCH = 'main';
 const API = `https://api.github.com/repos/${OWNER}/${REPO}`;
 const SKIP = /^(license|readme\.md|\.nojekyll|\.gitignore|_redirects)$/i;
 const VIRTUAL_ROOT = 'https://repo.invalid/';
