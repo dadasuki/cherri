@@ -1,0 +1,453 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SVG Launcher</title>
+<style>
+:root{color-scheme:dark;--bg:#0c0b10;--line:#322f3d;--text:#f1eef8;--muted:#a29cb2;--accent:#b58cff;--good:#7ee2a8;--bad:#ff8b9a}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+body{display:grid;place-items:center;padding:20px;min-height:100vh}
+.card{width:min(580px,100%);padding:26px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(150deg,#1d1a26,#141219)}
+h1{margin:0 0 4px;font-size:26px;letter-spacing:-.04em}
+.sub{margin:0 0 16px;color:var(--muted);font-size:13px}
+.top{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted)}
+.top b{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:75%}
+.bar{height:6px;margin-top:8px;border-radius:9px;background:#2a2735;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#7a4ee0,#d9c8ff);transition:width .15s}
+#log{margin-top:12px;padding:10px;border:1px solid var(--line);border-radius:12px;background:#100e15;max-height:200px;overflow:auto;font:11px/1.7 ui-monospace,Consolas,monospace;color:var(--muted);white-space:pre-wrap}
+#log .ok{color:var(--good)}#log .bad{color:var(--bad)}
+button{margin-top:12px;padding:10px 16px;border:1px solid #b58cff;border-radius:11px;background:#221f2c;color:var(--text);font:600 13px inherit;cursor:pointer}
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>SVG Launcher</h1>
+  <p class="sub">Downloads every file from <code>cherriunblocked/svg</code> and runs it in this tab.</p>
+  <div class="top"><b id="cur">Starting…</b><span id="count"></span></div>
+  <div class="bar"><i id="bar"></i></div>
+  <div id="log"></div>
+  <button id="retry" hidden>Retry</button>
+</main>
+<script>
+(() => {
+'use strict';
+const OWNER = 'cherriunblocked', REPO = 'svg', BRANCH = 'main';
+const API = `https://api.github.com/repos/${OWNER}/${REPO}`;
+const SKIP = /^(license|readme\.md|\.nojekyll|\.gitignore|_redirects)$/i;
+const VIRTUAL_ROOT = 'https://repo.invalid/';
+const $ = id => document.getElementById(id);
+let version = BRANCH;
+
+/* ======== code that is also stringified into the launched page ======== */
+
+function normalizeRef(ref, base, roots) {
+  ref = String(ref || '').trim();
+  if (!ref || /^(data:|blob:|javascript:|mailto:|tel:|about:|#)/i.test(ref)) return null;
+  for (const r of roots) { if (ref.startsWith(r)) { ref = ref.slice(r.length); base = ''; break; } }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(ref) || ref.startsWith('//')) return null;
+  ref = ref.split('#')[0].split('?')[0];
+  try { ref = decodeURIComponent(ref); } catch (e) {}
+  const parts = ref.charAt(0) === '/' ? [] : String(base).split('/').filter(Boolean);
+  for (const s of ref.split('/')) {
+    if (!s || s === '.') continue;
+    if (s === '..') parts.pop(); else parts.push(s);
+  }
+  return parts.join('/') || null;
+}
+
+function shimCore(vfs, roots, bootSrc) {
+  const S = typeof window !== 'undefined' ? window : self;
+  const keys = Object.keys(vfs);
+  const find = ref => {
+    if (typeof ref !== 'string') return null;
+    const p = normalizeRef(ref, '', roots);
+    if (!p) return null;
+    if (vfs[p]) return vfs[p];
+    for (let i = 0; i < keys.length; i++) if (keys[i].endsWith('/' + p)) return vfs[keys[i]];
+    return null;
+  };
+  const mapAny = u => {
+    if (u && typeof u !== 'string' && typeof u.href === 'string' && !u.url) u = u.href;
+    return find(u) || u;
+  };
+  if (S.fetch) {
+    const f = S.fetch.bind(S);
+    S.fetch = (i, o) => f(typeof i === 'string' || (i && typeof i.href === 'string' && !i.url) ? mapAny(i) : i, o);
+  }
+  if (S.XMLHttpRequest) {
+    const o = S.XMLHttpRequest.prototype.open;
+    S.XMLHttpRequest.prototype.open = function (m, u, ...r) { return o.call(this, m, mapAny(u), ...r); };
+  }
+  if (typeof S.importScripts === 'function') {
+    const is = S.importScripts;
+    S.importScripts = (...a) => is.apply(S, a.map(mapAny));
+  }
+  if (!bootSrc) return;
+
+  /* ---- visible diagnostics so a blank page is never silent ---- */
+  const errs = []; let btn = null, panel = null;
+  const render = () => {
+    const root = document.documentElement; if (!root) return;
+    if (!btn) {
+      btn = document.createElement('div');
+      btn.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:2147483647;background:#7a1f2e;color:#fff;font:600 12px system-ui;padding:7px 11px;border-radius:9px;cursor:pointer;box-shadow:0 4px 18px #0008';
+      panel = document.createElement('div');
+      panel.style.cssText = 'position:fixed;right:10px;bottom:48px;z-index:2147483647;width:min(600px,92vw);max-height:62vh;overflow:auto;background:#14111b;color:#e8e3f3;border:1px solid #5a4a7a;border-radius:12px;padding:12px;font:11px/1.6 ui-monospace,Consolas,monospace;display:none';
+      btn.onclick = () => { panel.style.display = panel.style.display === 'none' ? 'block' : 'none'; };
+      root.appendChild(btn); root.appendChild(panel);
+    }
+    btn.textContent = '⚠ ' + errs.length + ' issue(s)';
+    const pre = document.createElement('div');
+    pre.style.whiteSpace = 'pre-wrap'; pre.style.overflowWrap = 'anywhere';
+    pre.textContent = errs.join('\n\n');
+    const row = document.createElement('div'); row.style.cssText = 'margin-top:10px;display:flex;gap:8px;flex-wrap:wrap';
+    [['Relaunch', ''], ['Use index.html entry', '#html'], ['Use index.svg entry', '#svg']].forEach(([t, h]) => {
+      const b = document.createElement('button');
+      b.textContent = t; b.style.cssText = 'padding:6px 10px;border-radius:8px;border:1px solid #7a5fb0;background:#241e33;color:#fff;cursor:pointer;font:600 11px system-ui';
+      b.onclick = () => { if (h) location.hash = h; location.reload(); };
+      row.appendChild(b);
+    });
+    panel.replaceChildren(pre, row);
+  };
+  const add = (m, show) => { m = String(m).slice(0, 500); if (errs.indexOf(m) < 0) { errs.push(m); if (show !== false) render(); } };
+  S.__diag = add;
+  S.addEventListener('error', e => {
+    if (e.target && e.target !== S) {
+      // Only a script or stylesheet that failed to load counts as a real problem; images, audio, etc. are ignored.
+      const t = e.target, n = t.localName;
+      if (n === 'script' || (n === 'link' && /stylesheet/i.test(t.rel || ''))) add('Failed to load <' + n + '> ' + (t.src || t.href || ''));
+      return;
+    }
+    const msg = e.message || '';
+    if (!msg || /^Script error\.?$/i.test(msg) || /ResizeObserver/i.test(msg)) return;   // harmless / unreadable noise
+    add(msg + (e.filename ? '  @ ' + String(e.filename).slice(-50) + ':' + e.lineno : ''));
+  }, true);
+  S.addEventListener('unhandledrejection', e => add('Promise rejected: ' + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason), false));
+  setTimeout(() => {
+    const b = document.body;
+    if (b && !b.innerText.trim() && !document.querySelector('canvas,iframe,img,video,svg:not([style*="z-index:2147483647"]),object,embed'))
+      add('The page finished loading but shows nothing. If no errors are listed above, the app probably needs its own web address or a service worker.');
+  }, 6000);
+
+  /* ---- stop the app from navigating the tab away from the launcher (e.g. to its CDN copy) ---- */
+  const blockNav = u => {
+    try { u = String(u && u.href !== undefined ? u.href : u); } catch (e) { return false; }
+    if (/^(javascript|data|blob|about):/i.test(u) || u.charAt(0) === '#') return false;
+    if (roots.some(r => u.startsWith(r))) return true;
+    return !/^[a-z][a-z0-9+.-]*:|^\/\//i.test(u);
+  };
+  const guard = (name, fn) => u => {
+    if (blockNav(u)) { add('Blocked the app from navigating this tab to: ' + u + '  (' + name + ')', false); return; }
+    return fn(u);
+  };
+  S.__safeNav = {
+    replace: guard('location.replace', u => S.location.replace(u)),
+    assign: guard('location.assign', u => S.location.assign(u)),
+    get href() { return S.location.href; },
+    set href(u) { guard('location.href', v => { S.location.href = v; })(u); }
+  };
+  document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('meta[http-equiv]').forEach(m => { if (/refresh/i.test(m.getAttribute('http-equiv'))) m.remove(); });
+  });
+
+  /* ---- redirect repo-relative URLs created at runtime ---- */
+  ['Worker', 'SharedWorker'].forEach(N => {
+    const O = S[N]; if (!O) return;
+    const W = function (u, o) {
+      const b = find(String((u && u.href) || u));
+      if (!b) return new O(u, o);
+      if (o && o.type === 'module') return new O(b, o);
+      return new O(S.URL.createObjectURL(new S.Blob([bootSrc + ';importScripts(' + JSON.stringify(b) + ');'], { type: 'text/javascript' })), o);
+    };
+    W.prototype = O.prototype; S[N] = W;
+  });
+  if (S.Audio) {
+    const A = S.Audio;
+    S.Audio = function (u) { return u === undefined ? new A() : new A(mapAny(u)); };
+    S.Audio.prototype = A.prototype;
+  }
+  const hook = (C, prop) => {
+    const d = Object.getOwnPropertyDescriptor(C.prototype, prop);
+    if (!d || !d.set) return;
+    Object.defineProperty(C.prototype, prop, Object.assign({}, d, { set(v) { d.set.call(this, typeof v === 'string' ? mapAny(v) : v); } }));
+  };
+  [['HTMLScriptElement','src'],['HTMLImageElement','src'],['HTMLMediaElement','src'],['HTMLSourceElement','src'],
+   ['HTMLIFrameElement','src'],['HTMLEmbedElement','src'],['HTMLTrackElement','src'],['HTMLLinkElement','href'],
+   ['HTMLVideoElement','poster'],['HTMLObjectElement','data']].forEach(([c, p]) => S[c] && hook(S[c], p));
+  const sa = S.Element.prototype.setAttribute;
+  S.Element.prototype.setAttribute = function (n, v) {
+    if (typeof v === 'string' && /^(src|href|poster|data|xlink:href)$/i.test(n) && this.localName !== 'a') v = mapAny(v);
+    return sa.call(this, n, v);
+  };
+  try {
+    if (!/[#&]nosw\b/.test(location.hash)) {
+      const noop = () => {};
+      const active = { state: 'activated', scriptURL: '', postMessage: noop, addEventListener: noop, removeEventListener: noop };
+      const reg = {
+        scope: location.href, installing: null, waiting: null, active, navigationPreload: {},
+        update: () => Promise.resolve(reg), unregister: () => Promise.resolve(true), addEventListener: noop, removeEventListener: noop
+      };
+      const fake = {
+        controller: active, ready: Promise.resolve(reg),
+        register: u => { console.warn('[launcher] serviceWorker.register(' + u + ') was stubbed: real service workers cannot run from a launcher page.'); return Promise.resolve(reg); },
+        getRegistration: () => Promise.resolve(reg), getRegistrations: () => Promise.resolve([reg]),
+        addEventListener: noop, removeEventListener: noop, startMessages: noop
+      };
+      Object.defineProperty(navigator, 'serviceWorker', { value: fake, configurable: true });
+    }
+  } catch (e) {}
+}
+
+/* ======== launcher UI ======== */
+
+const log = (t, c) => { const d = document.createElement('div'); if (c) d.className = c; d.textContent = t; $('log').appendChild(d); $('log').scrollTop = 1e9; };
+function meter(done, total, cur) {
+  $('count').textContent = total ? `${done}/${total}` : '';
+  $('bar').style.width = total ? (done / total * 100) + '%' : '0%';
+  if (cur) $('cur').textContent = cur;
+}
+
+/* ======== download ======== */
+
+const enc = p => p.split('/').map(encodeURIComponent).join('/');
+async function timedFetch(url, ms) {
+  const c = new AbortController(), t = setTimeout(() => c.abort(), ms);
+  try {
+    const r = await fetch(url, { cache: 'no-store', signal: c.signal });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r;
+  } finally { clearTimeout(t); }
+}
+async function discover() {
+  const errs = [];
+  try {
+    const c = await (await timedFetch(`${API}/commits/${BRANCH}`, 12000)).json();
+    const t = await (await timedFetch(`${API}/git/trees/${c.sha}?recursive=1`, 15000)).json();
+    if (t.truncated || !Array.isArray(t.tree)) throw new Error('tree truncated');
+    version = c.sha;
+    return t.tree.filter(x => x.type === 'blob').map(x => x.path);
+  } catch (e) { errs.push('GitHub API: ' + e.message); }
+  try {
+    const d = await (await timedFetch(`https://data.jsdelivr.com/v1/packages/gh/${OWNER}/${REPO}@${BRANCH}?structure=flat`, 15000)).json();
+    if (!Array.isArray(d.files)) throw new Error('no file list');
+    version = BRANCH;
+    return d.files.map(f => f.name.replace(/^\//, ''));
+  } catch (e) { errs.push('jsDelivr: ' + e.message); }
+  throw new Error('Could not list the repository files.\n' + errs.join('\n') + '\n(GitHub allows ~60 API requests/hour per IP without a token.)');
+}
+async function getFile(path) {
+  const e = enc(path);
+  const urls = [
+    `https://raw.githubusercontent.com/${OWNER}/${REPO}/${version}/${e}`,
+    `https://cdn.jsdelivr.net/gh/${OWNER}/${REPO}@${version}/${e}`,
+    `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/${e}`,
+    `https://cdn.jsdelivr.net/gh/${OWNER}/${REPO}@${BRANCH}/${e}`
+  ];
+  const errs = [];
+  for (let round = 0; round < 2; round++) for (const u of urls) {
+    try {
+      const bytes = await (await timedFetch(u, 25000)).arrayBuffer();
+      if (!bytes.byteLength) throw new Error('empty');
+      return bytes;
+    } catch (err) { errs.push(err.message); }
+  }
+  throw new Error(`${path}: ${errs.slice(0, 3).join(', ')}`);
+}
+const isText = p => /\.(html?|css|m?js|cjs|json|txt|xml|svg|webmanifest|map)$/i.test(p);
+
+async function loadAll() {
+  meter(0, 0, 'Finding files…'); log('Listing repository…');
+  const paths = (await discover()).filter(p => !SKIP.test(p));
+  if (!paths.includes('index.html') && !paths.includes('index.svg')) throw new Error('The repository has neither index.html nor index.svg at its root.');
+  log(`Found ${paths.length} files @ ${version.slice(0, 7)}`, 'ok');
+  const out = new Map(), fails = [];
+  let next = 0, done = 0;
+  const worker = async () => {
+    for (;;) {
+      const p = paths[next++]; if (p === undefined) return;
+      meter(done, paths.length, p);
+      try {
+        const bytes = await getFile(p);
+        out.set(p, { bytes, text: isText(p) ? new TextDecoder().decode(bytes) : null });
+      } catch (e) { fails.push(e.message); log('failed: ' + p, 'bad'); }
+      meter(++done, paths.length, p);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, paths.length) }, worker));
+  if (fails.length) throw new Error(`${fails.length} file(s) could not be downloaded, so the launcher stopped instead of starting a broken copy:\n` + fails.join('\n'));
+  log('All files downloaded', 'ok');
+  return out;
+}
+
+/* ======== build the page ======== */
+
+const MIME = {
+  html:'text/html', htm:'text/html', css:'text/css', js:'text/javascript', mjs:'text/javascript', cjs:'text/javascript', json:'application/json',
+  txt:'text/plain', svg:'image/svg+xml', png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp', avif:'image/avif',
+  gif:'image/gif', ico:'image/x-icon', mp3:'audio/mpeg', ogg:'audio/ogg', wav:'audio/wav', mp4:'video/mp4',
+  webm:'video/webm', woff:'font/woff', woff2:'font/woff2', ttf:'font/ttf', otf:'font/otf', wasm:'application/wasm',
+  xml:'application/xml', webmanifest:'application/manifest+json'
+};
+const mimeOf = p => MIME[p.split('.').pop().toLowerCase()] || 'application/octet-stream';
+const dirOf = p => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+
+function build(files, entry) {
+  const roots = [
+    `https://raw.githubusercontent.com/${OWNER}/${REPO}/${version}/`,
+    `https://raw.githubusercontent.com/${OWNER}/${REPO}/refs/heads/${BRANCH}/`,
+    `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/`,
+    `https://cdn.jsdelivr.net/gh/${OWNER}/${REPO}@${version}/`,
+    `https://cdn.jsdelivr.net/gh/${OWNER}/${REPO}@${BRANCH}/`,
+    `https://${OWNER}.github.io/${REPO}/`,
+    VIRTUAL_ROOT
+  ];
+  for (const h of ['cdn.jsdelivr.net', 'fastly.jsdelivr.net', 'gcore.jsdelivr.net', 'testingcf.jsdelivr.net', 'cdn.statically.io']) {
+    for (const v of [version, BRANCH, '']) {
+      const r = h === 'cdn.statically.io' ? `https://${h}/gh/${OWNER}/${REPO}/${v || BRANCH}/` : `https://${h}/gh/${OWNER}/${REPO}${v ? '@' + v : ''}/`;
+      if (!roots.includes(r)) roots.push(r);
+    }
+  }
+  roots.push(location.href.split('#')[0].split('?')[0].replace(/[^/]*$/, ''));
+  const vfs = {}, modMap = {};
+  const blob = (bytes, type) => URL.createObjectURL(new Blob([bytes], { type }));
+  const lookup = p => {
+    if (!p) return null;
+    if (vfs[p]) return vfs[p];
+    for (const k in vfs) if (k.endsWith('/' + p)) return vfs[k];
+    return null;
+  };
+  const hasFile = p => files.has(p) ? p : ([...files.keys()].find(k => k.endsWith('/' + p)) || null);
+
+  // JS: relative import specifiers become bare "@vfs/<path>" names resolved by an import map,
+  // which is the only way ES modules can import each other from blob: URLs (cycles included).
+  const jsRe = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(["'])([^"'\n]+)\2/g;
+  const rewriteJs = (text, dir, selfPath) => {
+    let t = text.replace(jsRe, (m, kw, q, spec) => {
+      const p = hasFile(normalizeRef(spec, dir, roots));
+      return p ? kw + q + '@vfs/' + p + q : m;
+    });
+    if (selfPath) t = t.replace(/import\.meta\.url/g, JSON.stringify(VIRTUAL_ROOT + selfPath));
+    const L = String.raw`(?<![\w$.])(?:(?:window|self|top|parent|globalThis|document)\s*\.\s*)?location\s*\.\s*`;
+    t = t.replace(new RegExp(L + String.raw`(replace|assign)\s*\(`, 'g'), '__safeNav.$1(');
+    t = t.replace(new RegExp(L + String.raw`href\s*=(?![=>])`, 'g'), '__safeNav.href=');
+    t = t.replace(/(?<![\w$.])(?:window|self|top|parent|globalThis|document)\s*\.\s*location\s*=(?![=>])/g, '__safeNav.href=');
+    return t;
+  };
+  const cssRe = /url\(\s*(['"]?)(.*?)\1\s*\)/g;
+  const rewriteCss = (t, dir) => t.replace(cssRe, (m, q, u) => {
+    const b = lookup(normalizeRef(u, dir, roots));
+    return b ? `url("${b}")` : m;
+  });
+
+  for (const [p, r] of files) {
+    if (/\.(css|m?js|cjs)$/i.test(p) || p === 'index.html' || p === 'index.svg') continue;
+    vfs[p] = blob(r.bytes, mimeOf(p));
+  }
+  for (const [p, r] of files) {
+    if (/\.css$/i.test(p)) vfs[p] = blob(rewriteCss(r.text || '', dirOf(p)), 'text/css');
+  }
+  for (const [p, r] of files) {
+    if (/\.(m?js|cjs)$/i.test(p)) { vfs[p] = blob(rewriteJs(r.text || '', dirOf(p), p), 'text/javascript'); modMap['@vfs/' + p] = vfs[p]; }
+  }
+  if (files.has('index.svg')) vfs['index.svg'] = blob(files.get('index.svg').bytes, 'image/svg+xml');
+
+  const rewriteAttrs = doc => {
+    doc.querySelectorAll('*').forEach(el => {
+      if (el.localName === 'a' || el.localName === 'base') return;
+      let changed = false;
+      for (const a of ['src', 'href', 'poster', 'data', 'xlink:href']) {
+        const v = el.getAttribute(a);
+        if (v == null) continue;
+        const b = lookup(normalizeRef(v, '', roots));
+        if (b) { el.setAttribute(a, b); changed = true; }
+      }
+      if (changed) { el.removeAttribute('integrity'); el.removeAttribute('crossorigin'); }
+      if (el.localName === 'script' && !el.getAttribute('src') && el.textContent) el.textContent = rewriteJs(el.textContent, '', '');
+      if (el.localName === 'style') el.textContent = rewriteCss(el.textContent, '');
+    });
+  };
+
+  let head = '', bodyHtml = '', bodyAttrs = '', htmlAttrs = '', title = '';
+  const text = files.get(entry).text;
+  if (entry === 'index.html') {
+    const doc = new DOMParser().parseFromString(text, 'text/html');
+    doc.querySelectorAll('base').forEach(b => b.remove());
+    rewriteAttrs(doc);
+    doc.querySelectorAll('meta[http-equiv]').forEach(m => { if (/refresh/i.test(m.getAttribute('http-equiv'))) m.remove(); });
+    head = doc.head.innerHTML;
+    bodyHtml = doc.body.innerHTML;
+    bodyAttrs = [...doc.body.attributes].map(a => ` ${a.name}="${a.value.replace(/"/g, '&quot;')}"`).join('');
+    htmlAttrs = [...doc.documentElement.attributes].map(a => ` ${a.name}="${a.value.replace(/"/g, '&quot;')}"`).join('');
+  } else {
+    const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+    if (doc.querySelector('parsererror')) throw new Error('index.svg is not valid XML.');
+    rewriteAttrs(doc);
+    const t = doc.querySelector('title'); title = t ? '<title>' + t.textContent.replace(/</g, '&lt;') + '</title>' : '';
+    // XMLSerializer escapes & < > inside <script>/<style> text. That is fine for XML, but the HTML parser
+    // does not decode entities inside XHTML <script>, which corrupts the code ("Unexpected token"). So the
+    // code is swapped out for tokens, the markup serialized, and the raw code put back in a parser-safe form.
+    const swaps = [], XHTML = 'http://www.w3.org/1999/xhtml';
+    doc.querySelectorAll('script,style').forEach(el => {
+      const code = el.textContent;
+      if (!code || !code.trim()) return;
+      const tag = el.localName;
+      const raw = el.namespaceURI === XHTML
+        ? code.replace(new RegExp('</' + tag, 'gi'), '<\\/' + tag)
+        : '<![CDATA[' + code.replace(/\]\]>/g, ']]]]><![CDATA[>') + ']]>';
+      el.textContent = '@@SWAP' + swaps.length + '@@';
+      swaps.push(raw);
+    });
+    bodyHtml = new XMLSerializer().serializeToString(doc.documentElement)
+      .replace(/@@SWAP(\d+)@@/g, (m, i) => swaps[+i]);
+    bodyAttrs = ' style="margin:0"';
+    head = '<meta charset="utf-8">' + title;
+  }
+
+  const bootSrc = normalizeRef.toString() + ';(' + shimCore.toString() + ')(' + JSON.stringify(vfs) + ',' + JSON.stringify(roots) + ');';
+  const shimSrc = normalizeRef.toString() + ';(' + shimCore.toString() + ')(' + JSON.stringify(vfs) + ',' + JSON.stringify(roots) + ',' + JSON.stringify(bootSrc) + ');';
+  const safe = str => str.replace(/<\/script/gi, '<\\/script');
+  const pre = '<script type="importmap">' + safe(JSON.stringify({ imports: modMap })) + '<\/script><script>' + safe(shimSrc) + '<\/script>';
+  const hasCharset = /<meta[^>]+charset/i.test(head);
+  return '<!doctype html><html' + htmlAttrs + '><head>' + (hasCharset ? '' : '<meta charset="utf-8">') + pre + head + '</head><body' + bodyAttrs + '>' + bodyHtml + '</body></html>';
+}
+
+function pickEntry(files) {
+  const forced = location.hash.replace('#', '');
+  const hasHtml = files.has('index.html'), hasSvg = files.has('index.svg');
+  if (forced === 'svg' && hasSvg) return 'index.svg';
+  if (forced === 'html' && hasHtml) return 'index.html';
+  if (hasHtml && hasSvg) {
+    const t = files.get('index.html').text || '';
+    return (/index\.svg/i.test(t) || !/<script/i.test(t)) ? 'index.svg' : 'index.html';
+  }
+  return hasHtml ? 'index.html' : 'index.svg';
+}
+
+async function main() {
+  $('retry').hidden = true;
+  try {
+    const files = await loadAll();
+    for (const [p, r] of files) {
+      if (r.text && /\.m?js$/i.test(p) && /serviceWorker\s*\.\s*register/.test(r.text)) {
+        log(`Note: ${p} registers a service worker. A stand-in is provided so the app can start, but real service-worker proxying cannot run from a launcher page.`); break;
+      }
+    }
+    const entry = pickEntry(files);
+    log('Entry: ' + entry, 'ok');
+    const html = build(files, entry);
+    meter(1, 1, 'Launching…');
+    document.open(); document.write(html); document.close();
+  } catch (e) {
+    log('Error: ' + (e && e.message || e), 'bad');
+    $('retry').hidden = false;
+  }
+}
+$('retry').onclick = () => location.reload();
+main();
+})();
+</script>
+</body>
+</html>
